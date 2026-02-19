@@ -1,0 +1,34 @@
+# Rust构建产物
+/target
+
+# 环境配置文件（包含敏感信息）
+.env
+*.env
+
+# IDE配置文件
+.vscode/
+.idea/
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# 日志文件
+*.log
+
+# 敏感配置文件
+secrets.env
+config.local.env
+
+# AI模型缓存目录（大文件）
+.fastembed_cache/
+models/
+*.bin
+*.onnx
+*.pt
+*.pth
+*.safetensors
+
+# Markdown文件限制 - 只允许README.md
+*.md
+!README.md
