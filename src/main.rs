@@ -122,7 +122,8 @@ async fn main() {
         .route("/ws", get(ws_handler))  // /ws路径，备用
         // === 新增管理接口 ===
         .route("/api/config", get(get_config).post(update_config))
-        .route("/api/knowledge", get(search_knowledge).post(add_knowledge))
+        .route("/api/knowledge/search", get(search_knowledge_get))  // 明确的搜索路由
+        .route("/api/knowledge", get(search_knowledge_get).post(add_knowledge))  // 兼容旧路由
         .route("/api/knowledge/list", get(list_knowledge))
         .route("/api/knowledge/:id", get(get_knowledge_by_id).put(update_knowledge).delete(delete_knowledge))
         .route("/api/prompts", get(get_prompts).post(update_prompts))
@@ -420,17 +421,28 @@ async fn process_event(json_str: &str, state: AppState, tx: tokio::sync::mpsc::S
     let mut kb_lock = state.kb.lock().await;
     let knowledge_docs = kb_lock.search(&raw_msg, 3).await.unwrap_or_default();
     let knowledge_str = knowledge_docs.join("\n---\n");
+    
+    info!("知识库搜索结果: {} 个文档", knowledge_docs.len());
+    if !knowledge_docs.is_empty() {
+        info!("知识库内容预览: {}", &knowledge_str.chars().take(200).collect::<String>());
+    }
 
     // 2. Gather Conversation Context
     let history_str = state.ctx_manager.get_rag_context(event.user_id, event.group_id).await.unwrap_or_default();
+    
+    info!("对话历史: {}", if history_str.is_empty() { "空" } else { "有内容" });
 
     // 3. Build Prompt using enhanced Prompt System
+    info!("构建提示词，知识库长度: {}, 历史长度: {}", knowledge_str.len(), history_str.len());
     let (system_prompt, user_prompt) = match state.prompt_manager.build_smart_prompt(
         raw_msg.clone(),
         Some(knowledge_str),
         Some(history_str),
     ) {
-        Ok((system, user)) => (system, user),
+        Ok((system, user)) => {
+            info!("提示词构建成功，系统提示长度: {}, 用户提示长度: {}", system.len(), user.len());
+            (system, user)
+        },
         Err(e) => {
             error!("Failed to build prompt: {}", e);
             send_msg(&tx, &event, "抱歉，构建提示词时出错。").await;
@@ -502,9 +514,49 @@ async fn update_config(State(_state): State<AppState>, Json(payload): Json<serde
     }))
 }
 
-// 搜索知识库
+// 搜索知识库 - GET请求处理（通过查询参数）
+async fn search_knowledge_get(State(state): State<AppState>, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+    info!("搜索知识库 (GET): {:?}", params);
+    
+    let query = params.get("query").map(|s| s.as_str()).unwrap_or("");
+    let limit = params.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(5);
+    
+    if query.is_empty() {
+        return Json(serde_json::json!({
+            "status": "error",
+            "message": "查询内容不能为空"
+        }));
+    }
+    
+    info!("开始搜索知识库，查询: {}, 限制: {}", query, limit);
+    let search_limit = state.prompt_manager.get_knowledge_search_limit();
+    let mut kb_lock = state.kb.lock().await;
+    
+    match kb_lock.search(query, search_limit.min(limit)).await {
+        Ok(results) => {
+            info!("搜索成功，找到 {} 个结果", results.len());
+            Json(serde_json::json!({
+                "status": "success",
+                "data": {
+                    "query": query,
+                    "results": results,
+                    "count": results.len()
+                }
+            }))
+        }
+        Err(e) => {
+            error!("知识库搜索失败: {}", e);
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!("搜索失败: {}", e)
+            }))
+        }
+    }
+}
+
+// 搜索知识库 - POST请求处理（通过JSON体）
 async fn search_knowledge(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
-    info!("搜索知识库: {:?}", payload);
+    info!("搜索知识库 (POST): {:?}", payload);
     
     let query = payload.get("query").and_then(|q| q.as_str()).unwrap_or("");
     let limit = payload.get("limit").and_then(|l| l.as_u64()).unwrap_or(5) as usize;
@@ -516,28 +568,26 @@ async fn search_knowledge(State(state): State<AppState>, Json(payload): Json<ser
         }));
     }
     
-    match state.prompt_manager.get_knowledge_search_limit() {
-        search_limit => {
-            let mut kb_lock = state.kb.lock().await;
-            match kb_lock.search(query, search_limit.min(limit)).await {
-                Ok(results) => {
-                    Json(serde_json::json!({
-                        "status": "success",
-                        "data": {
-                            "query": query,
-                            "results": results,
-                            "count": results.len()
-                        }
-                    }))
+    let search_limit = state.prompt_manager.get_knowledge_search_limit();
+    let mut kb_lock = state.kb.lock().await;
+    
+    match kb_lock.search(query, search_limit.min(limit)).await {
+        Ok(results) => {
+            Json(serde_json::json!({
+                "status": "success",
+                "data": {
+                    "query": query,
+                    "results": results,
+                    "count": results.len()
                 }
-                Err(e) => {
-                    error!("知识库搜索失败: {}", e);
-                    Json(serde_json::json!({
-                        "status": "error",
-                        "message": format!("搜索失败: {}", e)
-                    }))
-                }
-            }
+            }))
+        }
+        Err(e) => {
+            error!("知识库搜索失败: {}", e);
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!("搜索失败: {}", e)
+            }))
         }
     }
 }

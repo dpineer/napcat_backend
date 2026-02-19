@@ -25,12 +25,17 @@ impl KnowledgeBase {
     }
 
     pub async fn search(&mut self, query: &str, top_k: usize) -> Result<Vec<String>> {
+        tracing::info!("开始搜索知识库，查询: {}, top_k: {}", query, top_k);
+        
         let embeddings = self.embedder.embed(vec![query], None)?;
         let vector = embeddings.first().ok_or_else(|| anyhow::anyhow!("No embedding generated"))?.clone();
-
-        // Use a threshold of 0.6 to filter out irrelevant noise
-        let results: Vec<crate::models::SearchResult> = self.db.search_documents(vector, top_k as i32, 0.6).await?;
         
+        tracing::info!("生成嵌入向量成功，维度: {}", vector.len());
+
+        // Use a threshold of 0.1 to allow very flexible matching for Chinese content
+        let results: Vec<crate::models::SearchResult> = self.db.search_documents(vector, top_k as i32, 0.1).await?;
+        
+        tracing::info!("搜索完成，找到 {} 个结果", results.len());
         Ok(results.into_iter().map(|r| r.content).collect())
     }
 }
