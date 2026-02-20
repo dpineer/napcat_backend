@@ -242,6 +242,20 @@ async fn process_napcat_message(event: &OneBotEvent, state: &AppState) -> Option
     }
     
     info!("📝 Processing message: {}", raw_msg);
+
+    // 群聊消息检查是否被@
+    if let Some(group_id) = event.group_id {
+        // 机器人QQ号，从环境变量获取或硬编码
+        let bot_qq = env::var("BOT_QQ").unwrap_or_else(|_| "3955516984".to_string());
+        let at_pattern = format!("[CQ:at,qq={}]", bot_qq);
+        
+        // 检查是否被@，如果没有被@则忽略消息
+        if !raw_msg.contains(&at_pattern) {
+            info!("⏭️  群聊消息未@机器人，忽略消息");
+            return None;
+        }
+        info!("✅ 检测到@机器人消息");
+    }
     
     // --- Command: Learn ---
     if raw_msg.starts_with("/learn ") {
@@ -257,6 +271,7 @@ async fn process_napcat_message(event: &OneBotEvent, state: &AppState) -> Option
     
     // --- Standard Chat ---
     info!("Query: {}", raw_msg);
+
 
     // 1. Gather Knowledge (RAG)
     let mut kb_lock = state.kb.lock().await;
@@ -400,6 +415,21 @@ async fn process_event(json_str: &str, state: AppState, tx: tokio::sync::mpsc::S
     }
 
     info!("📝 处理消息: {}", raw_msg);
+
+    // 群聊消息检查是否被@
+    if let Some(group_id) = event.group_id {
+        // 机器人QQ号，从环境变量获取或硬编码
+        let bot_qq = env::var("BOT_QQ").unwrap_or_else(|_| "3955516984".to_string());
+        let at_pattern = format!("[CQ:at,qq={}]", bot_qq);
+        
+        // 检查是否被@，如果没有被@则忽略消息
+        if !raw_msg.contains(&at_pattern) {
+            info!("⏭️  群聊消息未@机器人，忽略消息");
+            return;
+        }
+        info!("✅ 检测到@机器人消息");
+    }
+
 
     // --- Command: Learn ---
     if raw_msg.starts_with("/learn ") {
