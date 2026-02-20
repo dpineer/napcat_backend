@@ -39,3 +39,9 @@ toml = "0.8"
 
 # WebSocket Client for NapCat
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+
+# XML parsing for forward messages
+quick-xml = "0.31"
+
+# Regular expressions for message cleaning
+regex = "1.10"

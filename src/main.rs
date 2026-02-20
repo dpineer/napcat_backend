@@ -19,6 +19,7 @@ mod context_manager;
 mod prompts;
 mod config;
 mod enhanced_prompts;
+mod message_parser;
 
 use db::DatabaseRepository;
 use knowledge_base::KnowledgeBase;
@@ -59,6 +60,65 @@ struct AppState {
     config: Arc<Config>,
     http_client: Client,
     db: Arc<DatabaseRepository>,
+    continuous_learning: Arc<tokio::sync::Mutex<ContinuousLearningState>>,
+}
+
+/// 连续学习模式状态
+#[derive(Clone, Debug)]
+struct ContinuousLearningState {
+    is_active: bool,
+    start_time: Option<std::time::Instant>,
+    collected_messages: Vec<String>,
+    user_id: Option<i64>,
+    group_id: Option<i64>,
+}
+
+impl ContinuousLearningState {
+    fn new() -> Self {
+        Self {
+            is_active: false,
+            start_time: None,
+            collected_messages: Vec::new(),
+            user_id: None,
+            group_id: None,
+        }
+    }
+    
+    fn start(&mut self, user_id: Option<i64>, group_id: Option<i64>) {
+        self.is_active = true;
+        self.start_time = Some(std::time::Instant::now());
+        self.collected_messages.clear();
+        self.user_id = user_id;
+        self.group_id = group_id;
+        info!("🎯 连续学习模式已启动，用户: {:?}, 群组: {:?}", user_id, group_id);
+    }
+    
+    fn stop(&mut self) {
+        self.is_active = false;
+        self.start_time = None;
+        info!("🛑 连续学习模式已停止，收集了 {} 条消息", self.collected_messages.len());
+    }
+    
+    fn add_message(&mut self, message: String) {
+        if self.is_active {
+            let preview = message.chars().take(50).collect::<String>();
+            self.collected_messages.push(message);
+            info!("📥 连续学习模式收集消息: {} (总数: {})", preview, self.collected_messages.len());
+        }
+    }
+    
+    fn should_auto_stop(&self) -> bool {
+        if let Some(start_time) = self.start_time {
+            let elapsed = start_time.elapsed();
+            elapsed >= std::time::Duration::from_secs(300) // 5分钟
+        } else {
+            false
+        }
+    }
+    
+    fn get_collected_content(&self) -> String {
+        self.collected_messages.join("\n---\n")
+    }
 }
 
 // --- Main ---
@@ -102,7 +162,14 @@ async fn main() {
         config,
         http_client: Client::new(),
         db: Arc::new(db_repo),
+        continuous_learning: Arc::new(tokio::sync::Mutex::new(ContinuousLearningState::new())),
     };
+
+    // 启动连续学习模式检查任务
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        continuous_learning_checker(state_clone).await;
+    });
 
     // 3. Start WebSocket Server to listen for NapCat connections
     let napcat_token = env::var("NAPCAT_TOKEN").expect("NAPCAT_TOKEN must be set");
@@ -244,7 +311,7 @@ async fn process_napcat_message(event: &OneBotEvent, state: &AppState) -> Option
     info!("📝 Processing message: {}", raw_msg);
 
     // 群聊消息检查是否被@
-    if let Some(group_id) = event.group_id {
+    if let Some(_group_id) = event.group_id {
         // 机器人QQ号，从环境变量获取或硬编码
         let bot_qq = env::var("BOT_QQ").unwrap_or_else(|_| "3955516984".to_string());
         let at_pattern = format!("[CQ:at,qq={}]", bot_qq);
@@ -272,11 +339,67 @@ async fn process_napcat_message(event: &OneBotEvent, state: &AppState) -> Option
     // --- Standard Chat ---
     info!("Query: {}", raw_msg);
 
+    // 解析消息内容，包括转发消息
+    let parsed_message = message_parser::parse_message(event);
+    let searchable_content = message_parser::get_searchable_content(&parsed_message);
+    
+    info!("解析后的搜索内容: {}", searchable_content);
+    if parsed_message.has_forward {
+        info!("检测到转发消息，内容长度: {}", parsed_message.forward_content.as_ref().map(|s| s.len()).unwrap_or(0));
+    }
+    if parsed_message.has_reply {
+        info!("检测到回复消息");
+    }
+
+    // 0. Auto-learn from forwarded messages if enabled
+    if let Some(config_manager) = state.prompt_manager.get_config_manager() {
+        let config = config_manager.get_config();
+        if config.system.auto_learn_enabled && parsed_message.has_forward {
+            if let Some(forward_content) = &parsed_message.forward_content {
+                let content_length = forward_content.len();
+                if content_length >= config.system.auto_learn_min_length && 
+                   content_length <= config.system.auto_learn_max_length {
+                    
+                    // 清理内容格式（如果不需要学习格式）
+                    let content_to_learn = if !config.system.learn_message_format {
+                        // 移除用户名和时间戳格式，只保留纯内容
+                        clean_message_content(forward_content)
+                    } else {
+                        forward_content.clone()
+                    };
+                    
+                    let mut kb_lock = state.kb.lock().await;
+                    match kb_lock.add_document(&content_to_learn).await {
+                        Ok(_) => {
+                            info!("✅ 自动学习成功：从转发消息中提取了 {} 字符的内容", content_to_learn.len());
+                        }
+                        Err(e) => {
+                            error!("❌ 自动学习失败：{}", e);
+                        }
+                    }
+                } else {
+                    info!("⏭️  转发内容长度 {} 不在学习范围内（{}-{}）", 
+                          content_length, config.system.auto_learn_min_length, config.system.auto_learn_max_length);
+                }
+            }
+        }
+    }
 
     // 1. Gather Knowledge (RAG)
     let mut kb_lock = state.kb.lock().await;
-    let knowledge_docs = kb_lock.search(&raw_msg, 3).await.unwrap_or_default();
-    let knowledge_str = knowledge_docs.join("\n---\n");
+    let knowledge_docs = kb_lock.search(&searchable_content, 3).await.unwrap_or_default();
+    
+    // 如果没有知识库结果但有转发内容，将转发内容作为临时知识
+    let knowledge_str = if knowledge_docs.is_empty() && parsed_message.has_forward {
+        if let Some(forward_content) = &parsed_message.forward_content {
+            info!("📚 使用转发内容作为临时知识库");
+            format!("转发消息内容：\n{}", forward_content)
+        } else {
+            String::new()
+        }
+    } else {
+        knowledge_docs.join("\n---\n")
+    };
     
     // 2. Gather Conversation Context
     let history_str = state.ctx_manager.get_rag_context(event.user_id, event.group_id).await.unwrap_or_default();
@@ -293,7 +416,7 @@ async fn process_napcat_message(event: &OneBotEvent, state: &AppState) -> Option
             return Some(create_napcat_reply(event, "抱歉，构建提示词时出错。"));
         }
     };
-    
+
     // 4. Call LLM
     match call_llm(&state, &system_prompt, &user_prompt).await {
         Ok(response) => {
@@ -320,6 +443,55 @@ fn create_napcat_reply(event: &OneBotEvent, msg: &str) -> tokio_tungstenite::tun
     
     let json_str = serde_json::to_string(&reply).unwrap();
     tokio_tungstenite::tungstenite::Message::Text(json_str)
+}
+
+/// 清理消息内容，移除用户名和时间戳格式
+fn clean_message_content(content: &str) -> String {
+    let mut cleaned = content.to_string();
+    
+    // 移除常见的用户名格式，如 "用户名: " 或 "用户名："
+    cleaned = regex::Regex::new(r"^[^:：]+[:：]\s*").unwrap().replace_all(&cleaned, "").to_string();
+    
+    // 移除时间戳格式，如 "[HH:MM]" 或 "[HH:MM:SS]"
+    cleaned = regex::Regex::new(r"\[\d{1,2}:\d{2}(?::\d{2})?\]\s*").unwrap().replace_all(&cleaned, "").to_string();
+    
+    // 移除日期格式，如 "[YYYY-MM-DD]" 或 "[YYYY/MM/DD]"
+    cleaned = regex::Regex::new(r"\[\d{4}[-/]\d{1,2}[-/]\d{1,2}\]\s*").unwrap().replace_all(&cleaned, "").to_string();
+    
+    // 移除多余的空白字符
+    cleaned = cleaned.split_whitespace().collect::<Vec<&str>>().join(" ");
+    
+    cleaned.trim().to_string()
+}
+
+/// 连续学习模式后台检查任务
+async fn continuous_learning_checker(state: AppState) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30)); // 每30秒检查一次
+    
+    loop {
+        interval.tick().await;
+        
+        let mut learning_state = state.continuous_learning.lock().await;
+        if learning_state.is_active && learning_state.should_auto_stop() {
+            info!("⏰ 连续学习模式达到5分钟，自动停止");
+            
+            // 收集的内容写入知识库
+            let collected_content = learning_state.get_collected_content();
+            if !collected_content.trim().is_empty() {
+                let mut kb_lock = state.kb.lock().await;
+                match kb_lock.add_document(&collected_content).await {
+                    Ok(_) => {
+                        info!("✅ 连续学习模式：成功将 {} 字符的内容写入知识库", collected_content.len());
+                    }
+                    Err(e) => {
+                        error!("❌ 连续学习模式：写入知识库失败: {}", e);
+                    }
+                }
+            }
+            
+            learning_state.stop();
+        }
+    }
 }
 
 // --- WebSocket Handlers ---
@@ -444,30 +616,105 @@ async fn process_event(json_str: &str, state: AppState, tx: tokio::sync::mpsc::S
         return;
     }
 
+    // --- Command: Continuous Learning Mode ---
+    if raw_msg.starts_with("/连续学习") || raw_msg.starts_with("/continuous_learn") {
+        let mut learning_state = state.continuous_learning.lock().await;
+        if learning_state.is_active {
+            // 如果已经在运行，则停止
+            let collected_content = learning_state.get_collected_content();
+            if !collected_content.trim().is_empty() {
+                let mut kb_lock = state.kb.lock().await;
+                match kb_lock.add_document(&collected_content).await {
+                    Ok(_) => {
+                        info!("✅ 连续学习模式：手动停止，成功将 {} 字符的内容写入知识库", collected_content.len());
+                        send_msg(&tx, &event, &format!("连续学习模式已停止，成功学习了 {} 条消息，共 {} 字符", 
+                            learning_state.collected_messages.len(), collected_content.len())).await;
+                    }
+                    Err(e) => {
+                        error!("❌ 连续学习模式：写入知识库失败: {}", e);
+                        send_msg(&tx, &event, "连续学习模式停止，但写入知识库失败。").await;
+                    }
+                }
+            } else {
+                send_msg(&tx, &event, "连续学习模式已停止，但没有收集到任何内容。").await;
+            }
+            learning_state.stop();
+        } else {
+            // 启动连续学习模式
+            learning_state.start(event.user_id, event.group_id);
+            send_msg(&tx, &event, "🎯 连续学习模式已启动！接下来的5分钟内，我会自动收集所有消息并学习。发送 /连续学习 或 /continuous_learn 可以手动停止。").await;
+        }
+        return;
+    }
+
+    // 检查连续学习模式是否激活，如果是则收集消息
+    {
+        let mut learning_state = state.continuous_learning.lock().await;
+        if learning_state.is_active {
+            // 清理消息内容（移除@机器人的部分）
+            let clean_content = raw_msg.replace(&format!("[CQ:at,qq={}]", env::var("BOT_QQ").unwrap_or_else(|_| "3955516984".to_string())), "").trim().to_string();
+            if !clean_content.is_empty() {
+                learning_state.add_message(clean_content);
+            }
+        }
+    }
+
     // --- Standard Chat ---
     info!("Query: {}", raw_msg);
 
-    // 1. Gather Knowledge (RAG)
-    let mut kb_lock = state.kb.lock().await;
-    let knowledge_docs = kb_lock.search(&raw_msg, 3).await.unwrap_or_default();
-    let knowledge_str = knowledge_docs.join("\n---\n");
+    // 解析消息内容，包括转发消息
+    let parsed_message = message_parser::parse_message(&event);
+    let searchable_content = message_parser::get_searchable_content(&parsed_message);
     
-    info!("知识库搜索结果: {} 个文档", knowledge_docs.len());
-    if !knowledge_docs.is_empty() {
-        info!("知识库内容预览: {}", &knowledge_str.chars().take(200).collect::<String>());
+    info!("解析后的搜索内容: {}", searchable_content);
+    if parsed_message.has_forward {
+        info!("检测到转发消息，内容长度: {}", parsed_message.forward_content.as_ref().map(|s| s.len()).unwrap_or(0));
+    }
+    if parsed_message.has_reply {
+        info!("检测到回复消息");
     }
 
-    // 2. Gather Conversation Context
-    let history_str = state.ctx_manager.get_rag_context(event.user_id, event.group_id).await.unwrap_or_default();
+    // 1. Build Context with Priority: Forward Content > Knowledge Base > History
+    let mut context_parts = Vec::new();
     
-    info!("对话历史: {}", if history_str.is_empty() { "空" } else { "有内容" });
+    // 优先加入转发内容（最重要的当前上下文）
+    if let Some(forward_content) = &parsed_message.forward_content {
+        if !forward_content.trim().is_empty() {
+            context_parts.push(format!("=== 当前参考的聊天记录/上下文 ===\n{}\n==============================\n", forward_content));
+            info!("✅ 已将转发内容加入提示词上下文，长度: {}", forward_content.len());
+        }
+    }
+    
+    // 2. Gather Knowledge (RAG)
+    let mut kb_lock = state.kb.lock().await;
+    let knowledge_docs = kb_lock.search(&searchable_content, 3).await.unwrap_or_default();
+    if !knowledge_docs.is_empty() {
+        let knowledge_str = knowledge_docs.join("\n---\n");
+        context_parts.push(format!("=== 知识库参考资料 ===\n{}\n\n", knowledge_str));
+        info!("知识库搜索结果: {} 个文档", knowledge_docs.len());
+        info!("知识库内容预览: {}", &knowledge_str.chars().take(200).collect::<String>());
+    } else {
+        info!("知识库搜索结果: 0 个文档");
+    }
 
-    // 3. Build Prompt using enhanced Prompt System
-    info!("构建提示词，知识库长度: {}, 历史长度: {}", knowledge_str.len(), history_str.len());
+    // 3. Gather Conversation Context
+    let history_str = state.ctx_manager.get_rag_context(event.user_id, event.group_id).await.unwrap_or_default();
+    if !history_str.is_empty() {
+        context_parts.push(format!("=== 对话历史 ===\n{}\n\n", history_str));
+        info!("对话历史: 有内容 (长度: {})", history_str.len());
+    } else {
+        info!("对话历史: 空");
+    }
+    
+    // 组合所有上下文
+    let full_context = context_parts.join("");
+    info!("构建提示词，总上下文长度: {}", full_context.len());
+
+    // 4. Build Prompt using enhanced Prompt System
     let (system_prompt, user_prompt) = match state.prompt_manager.build_smart_prompt(
         raw_msg.clone(),
-        Some(knowledge_str),
-        Some(history_str),
+        Some(full_context),
+        None, // 历史已经包含在context中
     ) {
         Ok((system, user)) => {
             info!("提示词构建成功，系统提示长度: {}, 用户提示长度: {}", system.len(), user.len());

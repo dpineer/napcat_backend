@@ -54,6 +54,14 @@ pub struct SystemConfig {
     pub knowledge_search_limit: usize,
     /// 相似度阈值
     pub similarity_threshold: f32,
+    /// 是否启用自动学习功能
+    pub auto_learn_enabled: bool,
+    /// 是否学习发言格式（用户名、时间等）
+    pub learn_message_format: bool,
+    /// 自动学习的最小内容长度
+    pub auto_learn_min_length: usize,
+    /// 自动学习的最大内容长度
+    pub auto_learn_max_length: usize,
 }
 
 impl Default for AppConfig {
@@ -77,6 +85,10 @@ impl AppConfig {
                 max_history_length: 10,
                 knowledge_search_limit: 5,
                 similarity_threshold: 0.6,
+                auto_learn_enabled: true,
+                learn_message_format: false,
+                auto_learn_min_length: 10,
+                auto_learn_max_length: 2000,
             },
         }
     }

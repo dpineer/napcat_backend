@@ -58,6 +58,37 @@ pub struct OneBotEvent {
     pub raw_message: Option<String>,
     pub user_id: Option<i64>,
     pub group_id: Option<i64>,
+    pub message: Option<Vec<MessageElement>>,
+    pub raw: Option<serde_json::Value>,
+}
+
+// 消息元素结构，支持多种消息类型
+#[derive(Deserialize, Debug, Clone)]
+pub struct MessageElement {
+    pub r#type: String,
+    pub data: serde_json::Value,
+}
+
+// 转发消息内容结构
+#[derive(Deserialize, Debug)]
+pub struct ForwardMessageContent {
+    pub xml_content: String,
+    pub res_id: String,
+    pub file_name: String,
+}
+
+// 回复元素结构
+#[derive(Deserialize, Debug)]
+pub struct ReplyElement {
+    pub id: String,
+    pub source_msg_text: Option<String>,
+    pub source_msg_text_elems: Option<Vec<ReplyTextElement>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ReplyTextElement {
+    pub reply_abs_elem_type: i32,
+    pub text_elem_content: Option<String>,
 }
 
 // Array format support for NapCat

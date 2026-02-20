@@ -13,6 +13,18 @@ knowledge_search_limit = 5
 # 相似度阈值 (0.0 - 1.0)
 similarity_threshold = 0.6
 
+# 是否启用自动学习功能
+auto_learn_enabled = true
+
+# 是否学习发言格式（用户名、时间等）
+learn_message_format = false
+
+# 自动学习的最小内容长度
+auto_learn_min_length = 10
+
+# 自动学习的最大内容长度
+auto_learn_max_length = 2000
+
 [prompts]
 # 默认提示词类型: Chat, Learn, Analyze, Creative, Professional, Friendly
 default_type = "Chat"
