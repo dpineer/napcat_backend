@@ -5,6 +5,9 @@ use quick_xml::Reader;
 
 use crate::models::{OneBotEvent, MessageElement};
 
+/// 消息解析器
+pub struct MessageParser;
+
 /// 解析后的消息内容，包含原始消息和转发消息内容
 #[derive(Debug, Clone)]
 pub struct ParsedMessage {
@@ -13,6 +16,7 @@ pub struct ParsedMessage {
     pub forward_content: Option<String>,
     pub has_forward: bool,
     pub has_reply: bool,
+    pub image_result: crate::models::ImageProcessingResult,
 }
 
 /// 从OneBot事件中解析消息内容
@@ -23,6 +27,7 @@ pub fn parse_message(event: &OneBotEvent) -> ParsedMessage {
         forward_content: None,
         has_forward: false,
         has_reply: false,
+        image_result: crate::models::ImageProcessingResult::default(),
     };
 
     // 首先尝试从raw字段解析详细消息结构
@@ -192,6 +197,18 @@ fn parse_message_elements(elements: &[MessageElement], parsed: &mut ParsedMessag
                     }
                 }
             }
+            "image" => {
+                if let Ok(image_data) = serde_json::from_value::<crate::models::ImageElement>(element.data.clone()) {
+                    debug!("检测到图片消息: file={}, url={:?}", image_data.file, image_data.url);
+                    parsed.image_result.has_image = true;
+                    parsed.image_result.image_urls.push(image_data.url.unwrap_or_default());
+                    
+                    // 添加图片描述占位符，实际使用时可以调用图片识别服务
+                    let description = format!("[图片: {}]", image_data.file);
+                    parsed.image_result.image_descriptions.push(description);
+                    parsed.image_result.processing_status = crate::models::ImageProcessingStatus::NotProcessed;
+                }
+            }
             _ => {}
         }
     }
@@ -227,18 +244,31 @@ pub fn extract_forward_content(xml_content: &str) -> Result<String, Box<dyn std:
 
     let mut texts = Vec::new();
     let mut buf = Vec::new();
+    let mut current_text = String::new();
+    let mut in_title = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 if e.name().as_ref() == b"title" {
-                    if let Ok(Event::Text(e)) = reader.read_event_into(&mut buf) {
-                        let text = e.unescape()?.into_owned();
-                        // 过滤掉标题行和空内容
-                        if !text.contains("群聊的聊天记录") && !text.trim().is_empty() {
-                            texts.push(text);
-                        }
+                    in_title = true;
+                    current_text.clear();
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if in_title {
+                    current_text.push_str(&e.unescape()?);
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                if e.name().as_ref() == b"title" && in_title {
+                    in_title = false;
+                    let text = current_text.trim();
+                    // 过滤掉标题行和空内容，但保留其他所有内容
+                    if !text.contains("群聊的聊天记录") && !text.is_empty() {
+                        texts.push(text.to_string());
                     }
+                    current_text.clear();
                 }
             }
             Ok(Event::Eof) => break,
@@ -249,6 +279,21 @@ pub fn extract_forward_content(xml_content: &str) -> Result<String, Box<dyn std:
             _ => {}
         }
         buf.clear();
+    }
+
+    // 也尝试直接提取所有文本内容作为备选
+    if texts.is_empty() {
+        let all_text = regex::Regex::new(r">([^<]+)<")
+            .unwrap()
+            .captures_iter(xml_content)
+            .filter_map(|cap| cap.get(1))
+            .map(|m| m.as_str().trim())
+            .filter(|s| !s.is_empty() && !s.contains("群聊的聊天记录"))
+            .collect::<Vec<_>>();
+        
+        if !all_text.is_empty() {
+            texts = all_text.into_iter().map(|s| s.to_string()).collect();
+        }
     }
 
     if texts.is_empty() {
@@ -279,26 +324,29 @@ pub fn get_searchable_content(parsed: &ParsedMessage) -> String {
         content.push_str(forward_content);
     }
     
+    // 添加图片描述
+    if parsed.image_result.has_image && !parsed.image_result.image_descriptions.is_empty() {
+        content.push_str("\n图片内容: ");
+        content.push_str(&parsed.image_result.image_descriptions.join(", "));
+    }
+    
     content.trim().to_string()
 }
 
 /// 移除CQ码，保留纯文本
-fn remove_cq_codes(text: &str) -> String {
+pub fn remove_cq_codes(text: &str) -> String {
     let mut result = text.to_string();
     
-    // 移除回复CQ码
-    if let Some(start) = result.find("[CQ:reply,") {
-        if let Some(end) = result[start..].find(']') {
-            result.replace_range(start..start+end+1, "");
-        }
-    }
+    // 使用正则表达式移除所有CQ码，包括回复、@、转发等
+    let cq_regex = regex::Regex::new(r"\[CQ:[^\]]+\]").unwrap();
+    result = cq_regex.replace_all(&result, "").to_string();
     
-    // 移除@CQ码
-    if let Some(start) = result.find("[CQ:at,") {
-        if let Some(end) = result[start..].find(']') {
-            result.replace_range(start..start+end+1, "");
-        }
-    }
+    // 额外清理转发消息标记
+    result = result.replace("[聊天记录]", "");
+    result = result.replace("[转发消息]", "");
+    
+    // 清理多余的空白字符
+    result = result.split_whitespace().collect::<Vec<&str>>().join(" ");
     
     result.trim().to_string()
 }

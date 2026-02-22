@@ -2,7 +2,24 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use anyhow::Result;
-use crate::prompts::{PromptTemplate, PromptType};
+use crate::enhanced_prompts::PromptType;
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemConfig {
+    pub config_alts_dir: String,
+    pub tool_prompts: String,
+    pub cache_dir: String,
+    pub audio_cache_dir: String,
+    pub knowledge_search_limit: usize,
+    pub similarity_threshold: f32,
+    pub max_history_length: usize,
+    pub log_level: String,
+    pub auto_learn_enabled: bool,
+    pub auto_learn_min_length: usize,
+    pub auto_learn_max_length: usize,
+    pub learn_message_format: bool,
+}
 
 /// 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,26 +60,6 @@ pub struct CustomPromptTemplate {
     pub enabled: bool,
 }
 
-/// 系统配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemConfig {
-    /// 日志级别
-    pub log_level: String,
-    /// 最大对话历史记录数
-    pub max_history_length: usize,
-    /// 知识库搜索结果数量
-    pub knowledge_search_limit: usize,
-    /// 相似度阈值
-    pub similarity_threshold: f32,
-    /// 是否启用自动学习功能
-    pub auto_learn_enabled: bool,
-    /// 是否学习发言格式（用户名、时间等）
-    pub learn_message_format: bool,
-    /// 自动学习的最小内容长度
-    pub auto_learn_min_length: usize,
-    /// 自动学习的最大内容长度
-    pub auto_learn_max_length: usize,
-}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -81,6 +78,10 @@ impl AppConfig {
                 config_path: None,
             },
             system: SystemConfig {
+                config_alts_dir: "config_alts".to_string(),
+                tool_prompts: "tool_prompts".to_string(),
+                cache_dir: "cache".to_string(),
+                audio_cache_dir: "cache/audio".to_string(),
                 log_level: "info".to_string(),
                 max_history_length: 10,
                 knowledge_search_limit: 5,
@@ -165,17 +166,17 @@ impl AppConfig {
     }
 
     /// 转换为标准提示词模板
-    pub fn to_prompt_template(&self, custom: &CustomPromptTemplate) -> PromptTemplate {
-        PromptTemplate {
+    pub fn to_prompt_template(&self, custom: &CustomPromptTemplate) -> crate::enhanced_prompts::PromptTemplate {
+        crate::enhanced_prompts::PromptTemplate {
             system_prompt: custom.system_prompt.clone(),
-            user_template: custom.user_template.clone(),
+            user_prompt: custom.user_template.clone(), // 注意：这里使用user_prompt而不是user_template
             description: custom.description.clone(),
-            parameters: custom.parameters.clone(),
         }
     }
 }
 
 /// 配置管理器
+#[derive(Clone)]
 pub struct ConfigManager {
     config: AppConfig,
     config_path: Option<String>,

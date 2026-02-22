@@ -32,8 +32,8 @@ impl KnowledgeBase {
         
         tracing::info!("生成嵌入向量成功，维度: {}", vector.len());
 
-        // Use a threshold of 0.1 to allow very flexible matching for Chinese content
-        let results: Vec<crate::models::SearchResult> = self.db.search_documents(vector, top_k as i32, 0.1).await?;
+        // Use a threshold of 0.6 for better matching quality
+        let results: Vec<crate::models::SearchResult> = self.db.search_documents(vector, top_k as i32, 0.6).await?;
         
         tracing::info!("搜索完成，找到 {} 个结果", results.len());
         Ok(results.into_iter().map(|r| r.content).collect())

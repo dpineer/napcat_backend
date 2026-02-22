@@ -65,7 +65,7 @@ impl PromptManager {
         self.templates.insert(
             PromptType::Chat,
             PromptTemplate {
-                system_prompt: "你是一个AI助手，专门为群聊提供智能回复。请使用提供的上下文信息来回答问题，如果不确定，请诚实地说出来。保持回答简洁、有用且友好。".to_string(),
+                system_prompt: "你是一个AI助手，专门为群聊提供智能回复。请使用提供的上下文信息来回答问题，如果不确定，请诚实地说出来。特别注意：如果用户引用了某条消息，相关的引用内容已经由系统提取并放在上下文信息中，请直接使用这些内容回答，不需要去查询任何ID。保持回答简洁、有用且友好。".to_string(),
                 user_template: "知识库信息：\n{knowledge}\n\n对话历史：\n{history}\n\n用户问题：{question}".to_string(),
                 description: "标准聊天模式，适合日常对话".to_string(),
                 parameters: vec!["knowledge".to_string(), "history".to_string(), "question".to_string()],

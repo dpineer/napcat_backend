@@ -1,16 +1,177 @@
-use crate::prompts::{PromptManager, PromptType, ChatPromptBuilder};
-use crate::config::{ConfigManager, AppConfig};
+use crate::config::{AppConfig, ConfigManager as AppConfManager};
 use std::collections::HashMap;
 use anyhow::Result;
 use tracing::{info, debug};
 use serde::{Serialize, Deserialize};
+
+// 定义缺失的类型
+#[derive(Debug, Clone, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum PromptType {
+    Chat,
+    Professional,
+    Creative,
+    Analyze,
+    Learn,
+    Friendly,
+}
+
+pub struct PromptManager {
+    templates: HashMap<PromptType, PromptTemplate>,
+    default_type: PromptType,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptTemplate {
+    pub description: String,
+    pub system_prompt: String,
+    pub user_prompt: String,
+}
+
+pub struct ChatPromptBuilder {
+    question: String,
+    knowledge: String,
+    history: String,
+    prompt_type: PromptType,
+}
+
+impl PromptManager {
+    pub fn new() -> Self {
+        let mut templates = HashMap::new();
+        
+        // 添加默认模板
+        templates.insert(
+            PromptType::Chat,
+            PromptTemplate {
+                description: "标准聊天".to_string(),
+                system_prompt: "你是一个有用的助手。".to_string(),
+                user_prompt: "{question}".to_string(),
+            }
+        );
+        
+        // 添加分析模板
+        templates.insert(
+            PromptType::Analyze,
+            PromptTemplate {
+                description: "深度分析".to_string(),
+                system_prompt: "你是一个专业的分析助手，擅长深入分析问题并提供详细见解。".to_string(),
+                user_prompt: "{question}".to_string(),
+            }
+        );
+        
+        // 添加创意模板
+        templates.insert(
+            PromptType::Creative,
+            PromptTemplate {
+                description: "创意写作".to_string(),
+                system_prompt: "你是一个富有创意的写作助手，擅长提供创新想法和创意内容。".to_string(),
+                user_prompt: "{question}".to_string(),
+            }
+        );
+        
+        // 添加专业模板
+        templates.insert(
+            PromptType::Professional,
+            PromptTemplate {
+                description: "专业助手".to_string(),
+                system_prompt: "你是一个专业的技术助手，擅长解决技术问题和提供专业建议。".to_string(),
+                user_prompt: "{question}".to_string(),
+            }
+        );
+        
+        // 添加学习模板
+        templates.insert(
+            PromptType::Learn,
+            PromptTemplate {
+                description: "学习助手".to_string(),
+                system_prompt: "你是一个学习助手，专注于帮助用户学习和记忆新知识。".to_string(),
+                user_prompt: "{question}".to_string(),
+            }
+        );
+        
+        // 添加友好模板
+        templates.insert(
+            PromptType::Friendly,
+            PromptTemplate {
+                description: "友好聊天".to_string(),
+                system_prompt: "你是一个友好的聊天伙伴，善于进行轻松愉快的对话。".to_string(),
+                user_prompt: "{question}".to_string(),
+            }
+        );
+        
+        Self {
+            templates,
+            default_type: PromptType::Chat,
+        }
+    }
+    
+    pub fn add_template(&mut self, prompt_type: PromptType, template: PromptTemplate) {
+        self.templates.insert(prompt_type, template);
+    }
+    
+    pub fn get_template(&self, prompt_type: &PromptType) -> Option<&PromptTemplate> {
+        self.templates.get(prompt_type)
+    }
+    
+    pub fn get_available_types(&self) -> Vec<PromptType> {
+        self.templates.keys().cloned().collect()
+    }
+    
+    pub fn get_default_template(&self) -> &PromptTemplate {
+        self.templates.get(&self.default_type).unwrap()
+    }
+    
+    pub fn set_default_type(&mut self, default_type: PromptType) {
+        self.default_type = default_type;
+    }
+}
+
+impl ChatPromptBuilder {
+    pub fn new(question: String) -> Self {
+        Self {
+            question,
+            knowledge: String::new(),
+            history: String::new(),
+            prompt_type: PromptType::Chat,
+        }
+    }
+    
+    pub fn with_knowledge(mut self, knowledge: String) -> Self {
+        self.knowledge = knowledge;
+        self
+    }
+    
+    pub fn with_history(mut self, history: String) -> Self {
+        self.history = history;
+        self
+    }
+    
+    pub fn with_prompt_type(mut self, prompt_type: PromptType) -> Self {
+        self.prompt_type = prompt_type;
+        self
+    }
+    
+    pub fn build(&self, manager: &PromptManager) -> Result<(String, String)> {
+        let template = manager.get_template(&self.prompt_type)
+            .ok_or_else(|| anyhow::anyhow!("未找到模板类型: {:?}", self.prompt_type))?;
+        
+        let system_prompt = template.system_prompt.clone();
+        let user_prompt = format!(
+            "问题: {}\n\n知识: {}\n\n历史: {}",
+            self.question,
+            self.knowledge,
+            self.history
+        );
+        
+        Ok((system_prompt, user_prompt))
+    }
+}
 
 /// 增强版提示词管理器
 pub struct EnhancedPromptManager {
     /// 基础提示词管理器
     base_manager: PromptManager,
     /// 配置管理器
-    config_manager: Option<ConfigManager>,
+    config_manager: Option<crate::config::ConfigManager>,
     /// 自定义提示词类型映射
     custom_types: HashMap<String, PromptType>,
 }
@@ -30,7 +191,7 @@ impl EnhancedPromptManager {
     }
 
     /// 从配置创建增强版提示词管理器
-    pub fn from_config(config_manager: ConfigManager) -> Self {
+    pub fn from_config(config_manager: crate::config::ConfigManager) -> Self {
         let mut manager = Self {
             base_manager: PromptManager::new(),
             config_manager: Some(config_manager),
@@ -90,7 +251,7 @@ impl EnhancedPromptManager {
     }
 
     /// 获取配置管理器
-    pub fn get_config_manager(&self) -> Option<&ConfigManager> {
+    pub fn get_config_manager(&self) -> Option<&crate::config::ConfigManager> {
         self.config_manager.as_ref()
     }
 
@@ -164,20 +325,43 @@ impl EnhancedPromptManager {
         
         // 根据消息内容智能选择提示词类型
         if message_lower.contains("分析") || message_lower.contains("分析下") || message_lower.contains("怎么看") {
-            PromptType::Analyze
+            // 检查Analyze类型是否存在，如果不存在则返回Chat
+            if self.base_manager.get_template(&PromptType::Analyze).is_some() {
+                PromptType::Analyze
+            } else {
+                PromptType::Chat
+            }
         } else if message_lower.contains("创意") || message_lower.contains("想法") || message_lower.contains("创意") {
-            PromptType::Creative
+            // 检查Creative类型是否存在，如果不存在则返回Chat
+            if self.base_manager.get_template(&PromptType::Creative).is_some() {
+                PromptType::Creative
+            } else {
+                PromptType::Chat
+            }
         } else if message_lower.contains("技术") || message_lower.contains("编程") || message_lower.contains("代码") {
-            PromptType::Professional
+            // 检查Professional类型是否存在，如果不存在则返回Chat
+            if self.base_manager.get_template(&PromptType::Professional).is_some() {
+                PromptType::Professional
+            } else {
+                PromptType::Chat
+            }
         } else if message_lower.contains("学习") || message_lower.contains("记住") || message_lower.contains("记录") {
-            PromptType::Learn
+            // 检查Learn类型是否存在，如果不存在则返回Chat
+            if self.base_manager.get_template(&PromptType::Learn).is_some() {
+                PromptType::Learn
+            } else {
+                PromptType::Chat
+            }
         } else if message_lower.contains("朋友") || message_lower.contains("聊天") || message_lower.contains("说说") {
-            PromptType::Friendly
+            // 检查Friendly类型是否存在，如果不存在则返回Chat
+            if self.base_manager.get_template(&PromptType::Friendly).is_some() {
+                PromptType::Friendly
+            } else {
+                PromptType::Chat
+            }
         } else {
             // 使用配置的默认类型
-            self.base_manager.get_default_template().description.contains("标准聊天")
-                .then(|| PromptType::Chat)
-                .unwrap_or_else(|| self.base_manager.get_available_types().first().cloned().unwrap_or(PromptType::Chat))
+            PromptType::Chat
         }
     }
 

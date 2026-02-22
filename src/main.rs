@@ -20,13 +20,16 @@ mod prompts;
 mod config;
 mod enhanced_prompts;
 mod message_parser;
+mod image_processor;
+
+use image_processor::{ImageProcessor, ImageServiceConfig};
 
 use db::DatabaseRepository;
 use knowledge_base::KnowledgeBase;
 use context_manager::ContextManager;
 use models::{OneBotEvent, NapCatArrayEvent, ReplyPayload, ReplyParams};
 use prompts::{ChatPromptBuilder, LearnPromptBuilder, PromptType};
-use config::{ConfigManager, AppConfig};
+use crate::config::{AppConfig, ConfigManager as AppConfManager};
 use enhanced_prompts::EnhancedPromptManager;
 
 // --- Config ---
@@ -149,8 +152,18 @@ async fn main() {
     ));
     let ctx_manager = Arc::new(ContextManager::new(db_repo.clone()));
     
+    // 初始化配置管理器
+    let app_config_manager = match AppConfManager::from_env() {
+        Ok(config_manager) => Arc::new(config_manager),
+        Err(e) => {
+            error!("Failed to initialize config manager: {}", e);
+            // 使用默认配置管理器
+            Arc::new(AppConfManager::new())
+        }
+    };
+    
     // 初始化增强版提示词管理器
-    let prompt_manager = Arc::new(EnhancedPromptManager::new());
+    let prompt_manager = Arc::new(EnhancedPromptManager::from_config((*app_config_manager).clone()));
     
     info!("提示词系统初始化完成");
     info!("可用提示词类型: {:?}", prompt_manager.get_base_manager().get_available_types());
@@ -337,7 +350,11 @@ async fn process_napcat_message(event: &OneBotEvent, state: &AppState) -> Option
     }
     
     // --- Standard Chat ---
-    info!("Query: {}", raw_msg);
+    info!("原始消息: {}", raw_msg);
+    
+    // 首先清理CQ码，避免AI被干扰
+    let clean_msg = message_parser::remove_cq_codes(&raw_msg);
+    info!("清理后的消息: {}", clean_msg);
 
     // 解析消息内容，包括转发消息
     let parsed_message = message_parser::parse_message(event);
@@ -387,7 +404,7 @@ async fn process_napcat_message(event: &OneBotEvent, state: &AppState) -> Option
 
     // 1. Gather Knowledge (RAG)
     let mut kb_lock = state.kb.lock().await;
-    let knowledge_docs = kb_lock.search(&searchable_content, 3).await.unwrap_or_default();
+    let knowledge_docs = kb_lock.search(&searchable_content, 10).await.unwrap_or_default();
     
     // 如果没有知识库结果但有转发内容，将转发内容作为临时知识
     let knowledge_str = if knowledge_docs.is_empty() && parsed_message.has_forward {
@@ -605,13 +622,28 @@ async fn process_event(json_str: &str, state: AppState, tx: tokio::sync::mpsc::S
 
     // --- Command: Learn ---
     if raw_msg.starts_with("/learn ") {
+        info!("📝 检测到/learn命令，原始消息: {}", raw_msg);
         let content = raw_msg.replace("/learn ", "");
+        info!("📋 提取的学习内容: '{}'", content);
+        
+        if content.trim().is_empty() {
+            info!("⚠️ 学习内容为空，跳过学习");
+            send_msg(&tx, &event, "学习内容为空，请输入要学习的文本。").await;
+            return;
+        }
+        
         let mut kb_lock = state.kb.lock().await;
-        if let Err(e) = kb_lock.add_document(&content).await {
-            error!("Learn failed: {}", e);
-            send_msg(&tx, &event, "Failed to learn.").await;
-        } else {
-            send_msg(&tx, &event, "Knowledge stored successfully.").await;
+        info!("🚀 开始将内容添加到知识库，长度: {} 字符", content.len());
+        
+        match kb_lock.add_document(&content).await {
+            Ok(_) => {
+                info!("✅ 学习成功：已将 {} 字符的内容添加到知识库", content.len());
+                send_msg(&tx, &event, &format!("学习成功！已将 {} 字符的内容添加到知识库。", content.len())).await;
+            }
+            Err(e) => {
+                error!("❌ 学习失败: {}", e);
+                send_msg(&tx, &event, &format!("学习失败: {}", e)).await;
+            }
         }
         return;
     }
@@ -647,6 +679,14 @@ async fn process_event(json_str: &str, state: AppState, tx: tokio::sync::mpsc::S
         return;
     }
 
+    // 首先清理CQ码，避免AI被干扰
+    let clean_msg = message_parser::remove_cq_codes(&raw_msg);
+    info!("清理后的消息: {}", clean_msg);
+
+    // 解析消息内容，包括转发消息
+    let parsed_message = message_parser::parse_message(&event);
+    let searchable_content = message_parser::get_searchable_content(&parsed_message);
+    
     // 检查连续学习模式是否激活，如果是则收集消息
     {
         let mut learning_state = state.continuous_learning.lock().await;
@@ -659,12 +699,37 @@ async fn process_event(json_str: &str, state: AppState, tx: tokio::sync::mpsc::S
         }
     }
 
+    // --- 引用内容自动学习 ---
+    if parsed_message.has_reply || parsed_message.has_forward {
+        if let Some(config_manager) = state.prompt_manager.get_config_manager() {
+            let config = config_manager.get_config();
+            if config.system.auto_learn_enabled {
+                if let Some(forward_content) = &parsed_message.forward_content {
+                    info!("📝 检测到引用/转发消息，自动学习内容（长度: {}）", forward_content.len());
+                    let content_to_learn = if !config.system.learn_message_format {
+                        clean_message_content(forward_content)
+                    } else {
+                        forward_content.clone()
+                    };
+                    
+                    if !content_to_learn.is_empty() {
+                        let mut kb_lock = state.kb.lock().await;
+                        match kb_lock.add_document(&content_to_learn).await {
+                            Ok(_) => {
+                                info!("✅ 引用内容自动学习成功：{} 字符", content_to_learn.len());
+                            }
+                            Err(e) => {
+                                error!("❌ 引用内容自动学习失败：{}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // --- Standard Chat ---
     info!("Query: {}", raw_msg);
-
-    // 解析消息内容，包括转发消息
-    let parsed_message = message_parser::parse_message(&event);
-    let searchable_content = message_parser::get_searchable_content(&parsed_message);
     
     info!("解析后的搜索内容: {}", searchable_content);
     if parsed_message.has_forward {
@@ -712,7 +777,7 @@ async fn process_event(json_str: &str, state: AppState, tx: tokio::sync::mpsc::S
 
     // 4. Build Prompt using enhanced Prompt System
     let (system_prompt, user_prompt) = match state.prompt_manager.build_smart_prompt(
-        raw_msg.clone(),
+        clean_msg.clone(), // 使用清理后的消息，避免CQ码干扰
         Some(full_context),
         None, // 历史已经包含在context中
     ) {
