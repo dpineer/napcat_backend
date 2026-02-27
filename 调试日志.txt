@@ -47,3 +47,37 @@
 - 创建了示例程序验证功能正常工作
 - 所有测试通过，项目编译成功
 - 项目整体功能完整，可以支持智能提示词选择和高级配置管理
+
+更新：2026-02-23 10:33
+- 修复了dev.sh脚本问题，解决cargo run无法确定二进制目标的错误
+- 在dev.sh脚本中添加了--bin napcat_backend参数，明确指定运行的二进制文件
+- 服务已成功启动并在端口8082上监听
+- WebSocket连接已建立，系统正常运行
+- 服务正在接收心跳事件，表明连接稳定
+
+更新：2026-02-23 15:20
+- 集成VTuber功能，添加WebSocket接口支持实时通信
+- 实现了vtuber_ws_handler函数处理VTuber客户端连接
+- 集成WebSocketHandler用于管理VTuber WebSocket连接
+- 在消息处理流程中集成VTuber Agent调用，实现优先调用VTuber Agent，回退到LLM的机制
+- 添加对VTuber Agent响应流的处理，包括文本和音频响应
+- 实现音频自动转换为CQ码格式发送到NapCat
+- 使用UnifiedLauncher进行系统初始化，集成数据库、知识库、上下文管理器和VTuber服务的统一初始化
+- 添加ServiceContext用于管理VTuber服务实例
+- 修复多个编译错误，包括WebSocketHandler和ServiceContext的导入路径问题
+- 修复AppState结构体中的字段类型不匹配问题
+- 修复UnifiedLauncher的初始化和组件获取方式
+- 修复VTuber WebSocket处理器的实现
+- 修复消息处理流程，使其能够正确调用VTuber Agent
+- 添加tokio-stream依赖以支持流处理功能
+- 项目现在可以成功编译，所有错误都已修复
+- 成功将NapCat后端服务和Open LLM VTuber整合在一起
+
+更新：2026-02-23 15:30
+- 添加了与Open-LLM-Vtuber的WebSocket长连接功能
+- 在AppState中添加了vtuber_tx发送器用于向VTuber发送消息
+- 实现了connect_to_vtuber异步函数，用于连接到VTuber服务器并处理双向通信
+- 在消息处理流程中添加了向Open-LLM-Vtuber发送消息的功能
+- 实现了自动重连机制，确保VTuber连接的稳定性
+- 添加了详细的日志记录，包括连接状态、消息发送和接收等
+- 成功实现QQ消息与Open-LLM-Vtuber的联动功能

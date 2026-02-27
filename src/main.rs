@@ -24,9 +24,9 @@ mod image_processor;
 
 use image_processor::{ImageProcessor, ImageServiceConfig};
 
-use db::DatabaseRepository;
-use knowledge_base::KnowledgeBase;
-use context_manager::ContextManager;
+use napcat_backend::db::DatabaseRepository;
+use napcat_backend::knowledge_base::KnowledgeBase;
+use napcat_backend::context_manager::ContextManager;
 use models::{OneBotEvent, NapCatArrayEvent, ReplyPayload, ReplyParams};
 use prompts::{ChatPromptBuilder, LearnPromptBuilder, PromptType};
 use crate::config::{AppConfig, ConfigManager as AppConfManager};
@@ -136,22 +136,18 @@ async fn main() {
     
     let config = Arc::new(Config::from_env());
 
-    // 1. Init Database with Retry Logic (handled inside DatabaseRepository::new)
-    info!("Initializing system...");
-    let db_repo: DatabaseRepository = match DatabaseRepository::new(&config.database_url).await {
-        Ok(db) => db,
-        Err(e) => {
-            error!("CRITICAL: Could not connect to database: {}", e);
-            std::process::exit(1);
-        }
-    };
+    // 初始化数据库
+    info!("Initializing Database...");
+    let db_repo = Arc::new(DatabaseRepository::new(&config.database_url).await.unwrap());
 
-    // 2. Init Modules
-    let kb = Arc::new(tokio::sync::Mutex::new(
-        KnowledgeBase::new(db_repo.clone()).expect("Failed to init KnowledgeBase")
-    ));
-    let ctx_manager = Arc::new(ContextManager::new(db_repo.clone()));
-    
+    // 初始化知识库
+    info!("Initializing Knowledge Base...");
+    let kb = Arc::new(tokio::sync::Mutex::new(KnowledgeBase::new((*db_repo).clone()).unwrap()));
+
+    // 初始化上下文管理器
+    info!("Initializing Context Manager...");
+    let ctx_manager = Arc::new(ContextManager::new((*db_repo).clone()));
+
     // 初始化配置管理器
     let app_config_manager = match AppConfManager::from_env() {
         Ok(config_manager) => Arc::new(config_manager),
@@ -167,14 +163,14 @@ async fn main() {
     
     info!("提示词系统初始化完成");
     info!("可用提示词类型: {:?}", prompt_manager.get_base_manager().get_available_types());
-    
+
     let state = AppState {
         kb,
         ctx_manager,
         prompt_manager,
         config,
         http_client: Client::new(),
-        db: Arc::new(db_repo),
+        db: db_repo,
         continuous_learning: Arc::new(tokio::sync::Mutex::new(ContinuousLearningState::new())),
     };
 
@@ -219,6 +215,7 @@ async fn main() {
     
     axum::serve(listener, app).await.unwrap();
 }
+
 
 async fn connect_to_napcat(url: &str, _token: &str, state: AppState) {
     loop {
@@ -356,6 +353,7 @@ async fn process_napcat_message(event: &OneBotEvent, state: &AppState) -> Option
     let clean_msg = message_parser::remove_cq_codes(&raw_msg);
     info!("清理后的消息: {}", clean_msg);
 
+
     // 解析消息内容，包括转发消息
     let parsed_message = message_parser::parse_message(event);
     let searchable_content = message_parser::get_searchable_content(&parsed_message);
@@ -437,7 +435,6 @@ async fn process_napcat_message(event: &OneBotEvent, state: &AppState) -> Option
     // 4. Call LLM
     match call_llm(&state, &system_prompt, &user_prompt).await {
         Ok(response) => {
-            // Record the interaction
             let _ = state.ctx_manager.record_interaction(event.user_id, event.group_id, &raw_msg, &response).await;
             Some(create_napcat_reply(event, &response))
         }
@@ -511,8 +508,6 @@ async fn continuous_learning_checker(state: AppState) {
     }
 }
 
-// --- WebSocket Handlers ---
-
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
@@ -525,11 +520,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Writer Task
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            info!("📤 准备发送消息: {}", msg);
-            if let Err(e) = sender.send(Message::Text(msg)).await {
-                error!("WS Send Error: {}", e);
-                break;
+        loop {
+            if let Some(msg) = rx.recv().await {
+                if let Err(e) = sender.send(Message::Text(msg)).await {
+                    error!("WS Send Error: {}", e);
+                    break;
+                }
             }
         }
     });
@@ -679,9 +675,69 @@ async fn process_event(json_str: &str, state: AppState, tx: tokio::sync::mpsc::S
         return;
     }
 
+    // --- Database Query Commands ---
+    
+    // Command: 查看数据库统计信息
+    if raw_msg == "/db_stats" || raw_msg == "/数据库统计" {
+        let stats = get_database_stats(&state).await;
+        send_msg(&tx, &event, &stats).await;
+        return;
+    }
+
+    // Command: 查看最近的对话记录
+    if raw_msg.starts_with("/recent ") || raw_msg.starts_with("/最近对话 ") {
+        let parts: Vec<&str> = raw_msg.split_whitespace().collect();
+        let limit = if parts.len() > 1 {
+            parts[1].parse::<i64>().unwrap_or(5)
+        } else {
+            5
+        };
+        
+        let recent_conversations = get_recent_conversations_summary(&state, limit).await;
+        send_msg(&tx, &event, &recent_conversations).await;
+        return;
+    }
+
+    // Command: 查看知识库文档
+    if raw_msg == "/docs" || raw_msg == "/知识库" {
+        let docs_list = get_documents_list(&state).await;
+        send_msg(&tx, &event, &docs_list).await;
+        return;
+    }
+
+    // Command: 查看系统配置
+    if raw_msg == "/config" || raw_msg == "/配置" {
+        let config_info = get_system_config(&state).await;
+        send_msg(&tx, &event, &config_info).await;
+        return;
+    }
+
+    // Command: 查看用户上下文
+    if raw_msg == "/user_ctx" || raw_msg == "/用户上下文" {
+        if let Some(user_id) = event.user_id {
+            let user_context = get_user_context(&state, user_id).await;
+            send_msg(&tx, &event, &user_context).await;
+        } else {
+            send_msg(&tx, &event, "无法获取用户ID，无法查看用户上下文。").await;
+        }
+        return;
+    }
+
+    // Command: 查看群组上下文
+    if raw_msg == "/group_ctx" || raw_msg == "/群组上下文" {
+        if let Some(group_id) = event.group_id {
+            let group_context = get_group_context(&state, group_id).await;
+            send_msg(&tx, &event, &group_context).await;
+        } else {
+            send_msg(&tx, &event, "无法获取群组ID，无法查看群组上下文。").await;
+        }
+        return;
+    }
+
     // 首先清理CQ码，避免AI被干扰
     let clean_msg = message_parser::remove_cq_codes(&raw_msg);
     info!("清理后的消息: {}", clean_msg);
+
 
     // 解析消息内容，包括转发消息
     let parsed_message = message_parser::parse_message(&event);
@@ -795,7 +851,6 @@ async fn process_event(json_str: &str, state: AppState, tx: tokio::sync::mpsc::S
     // 4. Call LLM
     match call_llm(&state, &system_prompt, &user_prompt).await {
         Ok(response) => {
-            // Record the interaction
             let _ = state.ctx_manager.record_interaction(event.user_id, event.group_id, &raw_msg, &response).await;
             send_msg(&tx, &event, &response).await;
         }
@@ -1134,6 +1189,168 @@ async fn delete_knowledge(State(state): State<AppState>, Path(id): Path<String>)
                 "message": format!("删除失败: {}", e)
             }))
         }
+    }
+}
+
+// --- Database Query Helper Functions ---
+
+async fn get_database_stats(state: &AppState) -> String {
+    match state.db.get_conversations_count().await {
+        Ok(conv_count) => {
+            match state.db.get_documents_count().await {
+                Ok(doc_count) => {
+                    match state.db.get_user_contexts_count().await {
+                        Ok(user_ctx_count) => {
+                            match state.db.get_group_contexts_count().await {
+                                Ok(group_ctx_count) => {
+                                    format!(
+                                        "📊 数据库统计信息:\n\n\
+                                        💬 对话记录数量: {}\n\
+                                        📚 知识库文档数量: {}\n\
+                                        👤 用户上下文数量: {}\n\
+                                        👥 群组上下文数量: {}",
+                                        conv_count, doc_count, user_ctx_count, group_ctx_count
+                                    )
+                                }
+                                Err(e) => format!("❌ 获取群组上下文数量失败: {}", e)
+                            }
+                        }
+                        Err(e) => format!("❌ 获取用户上下文数量失败: {}", e)
+                    }
+                }
+                Err(e) => format!("❌ 获取知识库文档数量失败: {}", e)
+            }
+        }
+        Err(e) => format!("❌ 获取对话记录数量失败: {}", e)
+    }
+}
+
+async fn get_recent_conversations_summary(state: &AppState, limit: i64) -> String {
+    match state.db.get_recent_conversations_summary(limit).await {
+        Ok(conversations) => {
+            if conversations.is_empty() {
+                return "📭 没有找到最近的对话记录。".to_string();
+            }
+            
+            let mut result = format!("💬 最近 {} 条对话记录:\n\n", conversations.len());
+            
+            for (i, conv) in conversations.iter().enumerate() {
+                let id = conv["id"].as_str().unwrap_or("N/A");
+                let user_id = conv["user_id"].as_i64();
+                let group_id = conv["group_id"].as_i64();
+                let raw_message = conv["raw_message"].as_str().unwrap_or("N/A");
+                let bot_response = conv["bot_response"].as_str().unwrap_or("N/A");
+                let created_at = conv["created_at"].as_str().unwrap_or("N/A");
+                
+                result.push_str(&format!(
+                    "{}. [{}] ID: {}\n",
+                    i + 1,
+                    created_at.split('.').next().unwrap_or("N/A"), // 只显示时间部分
+                    id
+                ));
+                
+                if let Some(uid) = user_id {
+                    result.push_str(&format!("   用户: {}\n", uid));
+                }
+                
+                if let Some(gid) = group_id {
+                    result.push_str(&format!("   群组: {}\n", gid));
+                }
+                
+                result.push_str(&format!("   消息: {}\n", raw_message));
+                if !bot_response.is_empty() && bot_response != "N/A" {
+                    result.push_str(&format!("   回复: {}\n", bot_response));
+                }
+                
+                result.push('\n');
+            }
+            
+            result
+        }
+        Err(e) => format!("❌ 获取最近对话记录失败: {}", e)
+    }
+}
+
+async fn get_documents_list(state: &AppState) -> String {
+    match state.db.list_documents().await {
+        Ok(documents) => {
+            if documents.is_empty() {
+                return "📭 知识库中没有文档。".to_string();
+            }
+            
+            let mut result = format!("📚 知识库中的 {} 个文档:\n\n", documents.len());
+            
+            for (i, doc) in documents.iter().take(10).enumerate() { // 只显示前10个
+                let id = doc["id"].as_str().unwrap_or("N/A");
+                let content = doc["content"].as_str().unwrap_or("N/A");
+                let created_at = doc["created_at"].as_str().unwrap_or("N/A");
+                
+                result.push_str(&format!(
+                    "{}. [{}] {}\n   内容预览: {}...\n\n",
+                    i + 1,
+                    created_at.split('.').next().unwrap_or("N/A"),
+                    id,
+                    content.chars().take(100).collect::<String>()
+                ));
+            }
+            
+            if documents.len() > 10 {
+                result.push_str(&format!("... 还有 {} 个文档未显示", documents.len() - 10));
+            }
+            
+            result
+        }
+        Err(e) => format!("❌ 获取知识库文档列表失败: {}", e)
+    }
+}
+
+async fn get_system_config(state: &AppState) -> String {
+    match state.db.get_system_config().await {
+        Ok(configs) => {
+            if configs.is_empty() {
+                return "⚙️ 系统配置表为空。".to_string();
+            }
+            
+            let mut result = "⚙️ 系统配置信息:\n\n".to_string();
+            
+            for config in configs {
+                let key = config["config_key"].as_str().unwrap_or("N/A");
+                let value = &config["config_value"];
+                
+                result.push_str(&format!("{}: {}\n", key, serde_json::to_string(value).unwrap_or("N/A".to_string())));
+            }
+            
+            result
+        }
+        Err(e) => format!("❌ 获取系统配置失败: {}", e)
+    }
+}
+
+async fn get_user_context(state: &AppState, user_id: i64) -> String {
+    match state.db.get_user_context(user_id).await {
+        Ok(Some(context)) => {
+            format!(
+                "👤 用户 {} 的上下文:\n\n{}",
+                user_id,
+                serde_json::to_string_pretty(&context).unwrap_or("无法格式化上下文数据".to_string())
+            )
+        }
+        Ok(None) => format!("📭 用户 {} 没有找到上下文信息。", user_id),
+        Err(e) => format!("❌ 获取用户 {} 上下文失败: {}", user_id, e)
+    }
+}
+
+async fn get_group_context(state: &AppState, group_id: i64) -> String {
+    match state.db.get_group_context(group_id).await {
+        Ok(Some(context)) => {
+            format!(
+                "👥 群组 {} 的上下文:\n\n{}",
+                group_id,
+                serde_json::to_string_pretty(&context).unwrap_or("无法格式化上下文数据".to_string())
+            )
+        }
+        Ok(None) => format!("📭 群组 {} 没有找到上下文信息。", group_id),
+        Err(e) => format!("❌ 获取群组 {} 上下文失败: {}", group_id, e)
     }
 }
 

@@ -260,4 +260,74 @@ impl DatabaseRepository {
 
         Ok(())
     }
+
+    // --- 数据库查询命令相关功能 ---
+
+    pub async fn get_conversations_count(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) as count FROM conversations")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("count"))
+    }
+
+    pub async fn get_documents_count(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) as count FROM documents")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("count"))
+    }
+
+    pub async fn get_user_contexts_count(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) as count FROM user_contexts")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("count"))
+    }
+
+    pub async fn get_group_contexts_count(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) as count FROM group_contexts")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("count"))
+    }
+
+    pub async fn get_recent_conversations_summary(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query(r#"
+            SELECT id, user_id, group_id, raw_message, bot_response, created_at 
+            FROM conversations 
+            ORDER BY created_at DESC 
+            LIMIT $1
+        "#)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let conversations = rows.into_iter().map(|row| {
+            serde_json::json!({
+                "id": row.get::<uuid::Uuid, _>("id").to_string(),
+                "user_id": row.get::<Option<i64>, _>("user_id"),
+                "group_id": row.get::<Option<i64>, _>("group_id"),
+                "raw_message": format!("{}...", row.get::<String, _>("raw_message").chars().take(50).collect::<String>()),
+                "bot_response": row.get::<Option<String>, _>("bot_response").map(|s| format!("{}...", s.chars().take(50).collect::<String>())),
+                "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_string()
+            })
+        }).collect();
+
+        Ok(conversations)
+    }
+
+    pub async fn get_system_config(&self) -> Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query("SELECT config_key, config_value FROM system_config")
+            .fetch_all(&self.pool)
+            .await?;
+
+        let configs = rows.into_iter().map(|row| {
+            serde_json::json!({
+                "config_key": row.get::<String, _>("config_key"),
+                "config_value": row.get::<serde_json::Value, _>("config_value")
+            })
+        }).collect();
+
+        Ok(configs)
+    }
 }

@@ -2030,6 +2030,7 @@ dependencies = [
  "serde_yaml",
  "sqlx",
  "tokio",
+ "tokio-stream",
  "tokio-tungstenite 0.21.0",
  "toml 0.8.23",
  "tower-http 0.5.2",

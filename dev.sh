@@ -62,4 +62,4 @@ echo "按 Ctrl+C 停止服务"
 echo ""
 
 # 使用cargo run运行开发模式，确保环境变量传递
-export $(cat "$HOME/.config/napcat-backend/secrets.env" | grep -v '^#' | xargs) && cargo run
+export $(cat "$HOME/.config/napcat-backend/secrets.env" | grep -v '^#' | xargs) && cargo run --bin napcat_backend

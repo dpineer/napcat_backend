@@ -35,11 +35,11 @@ pub struct UnifiedLauncher {
 
 /// NapCat后端组件
 pub struct NapCatComponents {
-    kb: Arc<Mutex<KnowledgeBase>>,
-    ctx_manager: Arc<ContextManager>,
-    prompt_manager: Arc<EnhancedPromptManager>,
-    config: Arc<crate::models::Config>,
-    db: Arc<DatabaseRepository>,
+    pub kb: Arc<Mutex<KnowledgeBase>>,
+    pub ctx_manager: Arc<ContextManager>,
+    pub prompt_manager: Arc<EnhancedPromptManager>,
+    pub config: Arc<crate::models::Config>,
+    pub db: Arc<DatabaseRepository>,
 }
 
 impl UnifiedLauncher {
